@@ -4,14 +4,6 @@
 ;; description: Provides secure payment escrow, dispute resolution, and automated milestone releases with reputation tracking
 
 ;; traits
-(use-trait payment-trait
-  (
-    (transfer (uint principal principal) (response bool uint))
-    (balance-of (principal) (response uint uint))
-    (mint (uint principal) (response bool uint))
-    (burn (uint principal) (response bool uint))
-  )
-)
 
 ;; token definitions
 (define-fungible-token GUARD-POINTS)
@@ -123,9 +115,9 @@
 (define-map tax-withholding
   { freelancer: principal }
   {
-    withheld-amount: uint,
-    reporting-year: uint,
-    1099-status: bool
+    withheld_amount: uint,
+    reporting_year: uint,
+    status-1099: bool
   }
 )
 
@@ -145,17 +137,13 @@
   (milestones-count uint)
   (description (string-ascii 256))
 )
-  (response uint uint)
-  (let
-    (
-      (job-id (var-get next-job-id))
-      (milestone-amount (/ total-amount milestones-count))
-    )
-    (asserts! (> total-amount u0) ERR-INVALID-AMOUNT)
-    (asserts! (> milestones-count u0) ERR-INVALID-MILESTONE)
-    (asserts! (is-eq (string-len currency) (string-len currency)) (ok u0)) ;; basic validation
+  (let (
+    (job-id (var-get next-job-id))
+    (milestone-amount (/ total-amount milestones-count))
+  )
+    (asserts! (> total-amount u0) (err u1001))
+    (asserts! (> milestones-count u0) (err u1002))
     
-    ;; Initialize job
     (map-set jobs
       { job-id: job-id }
       {
@@ -164,49 +152,44 @@
         total-amount: total-amount,
         released-amount: u0,
         currency: currency,
-        created-at: block-height,
+        created-at: stacks-block-height,
         status: "active",
         milestones-count: milestones-count,
         description: description
       }
     )
     
-    ;; Initialize escrow balance
     (map-set escrow-balances
       { job-id: job-id }
       { amount: u0, released: u0 }
     )
     
-    ;; Update counter
     (var-set next-job-id (+ job-id u1))
-    
     (ok job-id)
   )
 )
 
 ;; Deposit funds into escrow for a job
 (define-public (deposit-escrow (job-id uint) (amount uint))
-  (response bool uint)
-  (let
-    (
-      (job (unwrap! (map-get? jobs { job-id: job-id }) ERR-INVALID-JOB))
-      (current-escrow (unwrap! (map-get? escrow-balances { job-id: job-id }) ERR-INVALID-JOB))
-    )
-    (asserts! (is-eq (get client job) tx-sender) ERR-UNAUTHORIZED)
-    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
-    (asserts! (<= (+ (get amount current-escrow) amount) (get total-amount job)) ERR-INSUFFICIENT-FUNDS)
+  (let (
+    (job (unwrap! (map-get? jobs { job-id: job-id }) (err u1003))) ;; ERR-INVALID-JOB
+    (current-escrow (unwrap! (map-get? escrow-balances { job-id: job-id }) (err u1003))) ;; ERR-INVALID-JOB
+  )
+    (asserts! (is-eq (get client job) tx-sender) (err u1000)) ;; ERR-UNAUTHORIZED
+    (asserts! (> amount u0) (err u1001)) ;; ERR-INVALID-AMOUNT
+    (asserts! (<= (+ (get amount current-escrow) amount) (get total-amount job)) (err u1004)) ;; ERR-INSUFFICIENT-FUNDS
     
     ;; Update escrow balance
     (map-set escrow-balances
       { job-id: job-id }
-      { amount: (+ (get amount current-escrow) amount), released: (get released current-escrow) }
+      { 
+        amount: (+ (get amount current-escrow) amount), 
+        released: (get released current-escrow) 
+      }
     )
     
     ;; Update total escrow tracking
     (var-set total-escrow (+ (var-get total-escrow) amount))
-    
-    ;; In real implementation, would transfer STX here using stx-transfer-memo
-    ;; (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
     
     (ok true)
   )
@@ -218,20 +201,21 @@
   (milestone-id uint)
   (proof-hash (buff 32))
 )
-  (response bool uint)
-  (let
-    (
-      (job (unwrap! (map-get? jobs { job-id: job-id }) ERR-INVALID-JOB))
-      (milestone (unwrap! (map-get? milestones { job-id: job-id, milestone-id: milestone-id }) ERR-INVALID-MILESTONE))
-    )
-    (asserts! (is-eq (get freelancer job) tx-sender) ERR-UNAUTHORIZED)
-    (asserts! (is-eq (get status milestone) "pending") ERR-INVALID-PAYMENT-STATE)
-    (asserts! (< block-height (get deadline milestone)) ERR-INVALID-MILESTONE)
+  (let (
+    (job (unwrap! (map-get? jobs { job-id: job-id }) (err u1003))) ;; ERR-INVALID-JOB
+    (milestone (unwrap! (map-get? milestones { job-id: job-id, milestone-id: milestone-id }) (err u1002))) ;; ERR-INVALID-MILESTONE
+  )
+    (asserts! (is-eq (get freelancer job) tx-sender) (err u1000)) ;; ERR-UNAUTHORIZED
+    (asserts! (is-eq (get status milestone) "pending") (err u1006)) ;; ERR-INVALID-PAYMENT-STATE
+    (asserts! (< stacks-block-height (get deadline milestone)) (err u1002)) ;; ERR-INVALID-MILESTONE
     
     ;; Update milestone with proof
     (map-set milestones
       { job-id: job-id, milestone-id: milestone-id }
-      (merge milestone { proof-hash: (some proof-hash), status: "submitted" })
+      (merge milestone { 
+        proof-hash: (some proof-hash), 
+        status: "submitted" 
+      })
     )
     
     (ok true)
@@ -243,17 +227,15 @@
   (job-id uint)
   (milestone-id uint)
 )
-  (response bool uint)
-  (let
-    (
-      (job (unwrap! (map-get? jobs { job-id: job-id }) ERR-INVALID-JOB))
-      (milestone (unwrap! (map-get? milestones { job-id: job-id, milestone-id: milestone-id }) ERR-INVALID-MILESTONE))
-      (escrow (unwrap! (map-get? escrow-balances { job-id: job-id }) ERR-INVALID-JOB))
-      (milestone-amount (get amount milestone))
-    )
-    (asserts! (is-eq (get client job) tx-sender) ERR-UNAUTHORIZED)
-    (asserts! (is-eq (get status milestone) "submitted") ERR-INVALID-PAYMENT-STATE)
-    (asserts! (>= (- (get amount escrow) (get released escrow)) milestone-amount) ERR-INSUFFICIENT-FUNDS)
+  (let (
+    (job (unwrap! (map-get? jobs { job-id: job-id }) (err u1003))) ;; ERR-INVALID-JOB
+    (milestone (unwrap! (map-get? milestones { job-id: job-id, milestone-id: milestone-id }) (err u1002))) ;; ERR-INVALID-MILESTONE
+    (escrow (unwrap! (map-get? escrow-balances { job-id: job-id }) (err u1003))) ;; ERR-INVALID-JOB
+    (milestone-amount (get amount milestone))
+  )
+    (asserts! (is-eq (get client job) tx-sender) (err u1000)) ;; ERR-UNAUTHORIZED
+    (asserts! (is-eq (get status milestone) "submitted") (err u1006)) ;; ERR-INVALID-PAYMENT-STATE
+    (asserts! (>= (- (get amount escrow) (get released escrow)) milestone-amount) (err u1004)) ;; ERR-INSUFFICIENT-FUNDS
     
     ;; Update milestone status
     (map-set milestones
@@ -264,11 +246,14 @@
     ;; Update escrow released amount
     (map-set escrow-balances
       { job-id: job-id }
-      { amount: (get amount escrow), released: (+ (get released escrow) milestone-amount) }
+      { 
+        amount: (get amount escrow), 
+        released: (+ (get released escrow) milestone-amount) 
+      }
     )
     
     ;; Update reputation
-    (try! (update-reputation (get freelancer job) true u1))
+    (unwrap-panic (update-reputation (get freelancer job) true u1))
     
     (ok true)
   )
@@ -276,7 +261,6 @@
 
 ;; Register as arbitrator with staking
 (define-public (register-arbitrator (stake-amount uint))
-  (response bool uint)
   (let
     (
       (arbitrator-id (var-get next-arbitrator-id))
@@ -294,12 +278,12 @@
             disputes-resolved: u0,
             reputation-score: u100,
             active: true,
-            joined-at: block-height
+            joined-at: stacks-block-height
           }
         )
         (var-set next-arbitrator-id (+ arbitrator-id u1))
         ;; Mint arbitrator reputation token
-        (ft-mint? GUARD-POINTS stake-amount tx-sender)
+        (try! (ft-mint? GUARD-POINTS stake-amount tx-sender))
         (ok true)
       )
     )
@@ -312,7 +296,6 @@
   (amount-at-stake uint)
   (defendant principal)
 )
-  (response uint uint)
   (let
     (
       (dispute-id (var-get next-dispute-id))
@@ -334,7 +317,7 @@
         plaintiff: tx-sender,
         defendant: defendant,
         amount-at-stake: amount-at-stake,
-        created-at: block-height,
+        created-at: stacks-block-height,
         resolved-at: none,
         arbitrator: none,
         ruling: none,
@@ -358,7 +341,6 @@
   (dispute-id uint)
   (ruling (string-ascii 20))
 )
-  (response bool uint)
   (let
     (
       (dispute (unwrap! (map-get? disputes { dispute-id: dispute-id }) ERR-INVALID-JOB))
@@ -374,7 +356,7 @@
       { dispute-id: dispute-id }
       (merge dispute
         {
-          resolved-at: (some block-height),
+          resolved-at: (some stacks-block-height),
           arbitrator: (some tx-sender),
           ruling: (some ruling),
           arbitrator-reward: fee-amount
@@ -394,7 +376,6 @@
 
 ;; Withdraw funds after milestone approval or dispute resolution
 (define-public (withdraw-funds (job-id uint) (amount uint))
-  (response bool uint)
   (let
     (
       (job (unwrap! (map-get? jobs { job-id: job-id }) ERR-INVALID-JOB))
@@ -415,7 +396,7 @@
     
     ;; Apply tax withholding (simplified: 10%)
     (let ((tax-amount (/ amount u10)))
-      (try! (update-tax-withholding tx-sender tax-amount))
+      (unwrap-panic (update-tax-withholding tx-sender tax-amount))
     )
     
     ;; In real implementation: (try! (stx-transfer? amount (as-contract tx-sender) tx-sender))
@@ -426,7 +407,6 @@
 
 ;; Claim instant payment if reputation qualifies
 (define-public (claim-instant-payment (job-id uint) (amount uint))
-  (response bool uint)
   (let
     (
       (job (unwrap! (map-get? jobs { job-id: job-id }) ERR-INVALID-JOB))
@@ -499,7 +479,6 @@
 
 ;; Update user reputation score
 (define-private (update-reputation (user principal) (completed bool) (jobs-delta uint))
-  (response bool uint)
   (let
     (
       (current-rep (default-to
@@ -516,7 +495,7 @@
         disputes-won: (get disputes-won current-rep),
         disputes-lost: (get disputes-lost current-rep),
         total-volume: (get total-volume current-rep),
-        last-updated: block-height
+        last-updated: stacks-block-height
       }
     )
     (ok true)
@@ -525,20 +504,19 @@
 
 ;; Track tax withholding
 (define-private (update-tax-withholding (freelancer principal) (amount uint))
-  (response bool uint)
   (let
     (
       (current-tax (default-to
-        { withheld-amount: u0, reporting-year: u2025, 1099-status: false }
+        { withheld_amount: u0, reporting_year: u2025,  status-1099: false }
         (map-get? tax-withholding { freelancer: freelancer })
       ))
     )
     (map-set tax-withholding
       { freelancer: freelancer }
       {
-        withheld-amount: (+ (get withheld-amount current-tax) amount),
-        reporting-year: (get reporting-year current-tax),
-        1099-status: true
+        withheld_amount: (+  (get withheld_amount current-tax) amount),
+        reporting_year:  (get reporting_year current-tax),
+        status-1099: true
       }
     )
     (ok true)
